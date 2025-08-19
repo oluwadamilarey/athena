@@ -9,16 +9,12 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::Window,
 };
-
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
-
 mod model;
 mod resources;
 mod texture;
-
 use model::{DrawModel, Vertex};
-
 #[rustfmt::skip]
 pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_cols(
     cgmath::Vector4::new(1.0, 0.0, 0.0, 0.0),
@@ -27,8 +23,17 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_co
     cgmath::Vector4::new(0.0, 0.0, 0.5, 1.0),
 );
 
-const NUM_INSTANCES_PER_ROW: u32 = 10;
-
+const NUM_INSTANCES_PER_ROW: u32 = 56;
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct LightUniform {
+    position: [f32; 3],
+    // Due to uniforms requiring 16 byte (4 float) spacing, we need to use a padding field here
+    _padding: u32,
+    color: [f32; 3],
+    // Due to uniforms requiring 16 byte (4 float) spacing, we need to use a padding field here
+    _padding2: u32,
+}
 #[derive(Debug)]
 struct Camera {
     eye: cgmath::Point3<f32>,
@@ -39,7 +44,6 @@ struct Camera {
     znear: f32,
     zfar: f32,
 }
-
 impl Camera {
     fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
@@ -47,13 +51,11 @@ impl Camera {
         proj * view
     }
 }
-
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
 }
-
 impl CameraUniform {
     fn new() -> Self {
         Self {
@@ -230,6 +232,8 @@ pub struct State {
     instance_buffer: wgpu::Buffer,
     depth_texture: texture::Texture,
     window: Arc<Window>,
+    light_uniform: LightUniform,
+    light_buffer: wgpu::Buffer,
 }
 
 impl State {
@@ -349,6 +353,7 @@ impl State {
                     let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
 
                     let position = cgmath::Vector3 { x, y: 0.0, z };
+
                     let rotation = if position.is_zero() {
                         cgmath::Quaternion::from_axis_angle(
                             cgmath::Vector3::unit_z(),
@@ -396,7 +401,7 @@ impl State {
 
         log::warn!("Load model");
         let obj_model =
-            resources::load_model("torus.obj", &device, &queue, &texture_bind_group_layout)
+            resources::load_model("cube.obj", &device, &queue, &texture_bind_group_layout)
                 .await
                 .unwrap();
 
@@ -469,6 +474,23 @@ impl State {
             cache: None,
         });
 
+        let light_uniform = LightUniform {
+            position: [2.0, 2.0, 2.0],
+            _padding: 0,
+            color: [1.0, 1.0, 1.0],
+            _padding2: 0,
+        };
+
+        // We'll want to update our lights position, so we use COPY_DST
+        let light_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Light VB"),
+                contents: bytemuck::cast_slice(&[light_uniform]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            }
+        );
+
+
         Ok(Self {
             surface,
             device,
@@ -486,13 +508,13 @@ impl State {
             instance_buffer,
             depth_texture,
             window,
+            light_buffer,
+            light_uniform,
         })
     }
-
     pub fn window(&self) -> &Window {
         &self.window
     }
-
     fn resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
             self.config.width = width;
@@ -511,7 +533,6 @@ impl State {
             self.camera_controller.handle_key(key, pressed);
         }
     }
-
     fn update(&mut self) {
         self.camera_controller.update_camera(&mut self.camera);
         log::info!("{:?}", self.camera);
@@ -523,7 +544,6 @@ impl State {
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
     }
-
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         self.window.request_redraw();
 
@@ -591,7 +611,7 @@ impl State {
 pub struct App {
     #[cfg(target_arch = "wasm32")]
     proxy: Option<winit::event_loop::EventLoopProxy<State>>,
-    state: Option<State>,
+    state: Option<State>,3
 }
 
 impl App {
