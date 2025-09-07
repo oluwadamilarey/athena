@@ -71,6 +71,7 @@ pub trait DrawModel<'a> {
         material: &'a Material,
         camera_bind_group: &'a wgpu::BindGroup,
     );
+    
     fn draw_mesh_instanced(
         &mut self,
         mesh: &'a Mesh,
@@ -81,6 +82,8 @@ pub trait DrawModel<'a> {
 
     #[allow(unused)]
     fn draw_model(&mut self, model: &'a Model, camera_bind_group: &'a wgpu::BindGroup);
+    
+    
     fn draw_model_instanced(
         &mut self,
         model: &'a Model,

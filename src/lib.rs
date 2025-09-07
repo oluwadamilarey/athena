@@ -12,9 +12,15 @@ use winit::{
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 mod model;
+mod core;
 mod resources;
 mod texture;
+
+use core::math::*;
+// use core::math::*;
 use model::{DrawModel, Vertex};
+
+use crate::core::math::transform::GTransform;
 #[rustfmt::skip]
 pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_cols(
     cgmath::Vector4::new(1.0, 0.0, 0.0, 0.0),
@@ -34,6 +40,8 @@ struct LightUniform {
     // Due to uniforms requiring 16 byte (4 float) spacing, we need to use a padding field here
     _padding2: u32,
 }
+
+
 #[derive(Debug)]
 struct Camera {
     eye: cgmath::Point3<f32>,
@@ -51,6 +59,8 @@ impl Camera {
         proj * view
     }
 }
+
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CameraUniform {
@@ -166,6 +176,13 @@ impl Instance {
             .into(),
         }
     }
+
+    fn to_raw_with_transform(&self) -> InstanceRaw {
+        let transform = GTransform::from_position_rotation(self.position, self.rotation);
+        InstanceRaw {
+            model: transform.to_matrix().into(),
+        }
+    }
 }
 
 #[repr(C)]
@@ -234,6 +251,7 @@ pub struct State {
     window: Arc<Window>,
     light_uniform: LightUniform,
     light_buffer: wgpu::Buffer,
+    light_bind_group: wgpu::BindGroup,
 }
 
 impl State {
@@ -281,7 +299,7 @@ impl State {
 
         log::warn!("Surface");
         let surface_caps = surface.get_capabilities(&adapter);
-        // Shader code in this tutorial assumes an Srgb surface texture. Using a different
+        // Shader code in this project assumes an Srgb surface texture. Using a different
         // one will result all the colors comming out darker. If you want to support non
         // Srgb surfaces, you'll need to account for that when drawing to the frame.
         let surface_format = surface_caps
@@ -291,6 +309,7 @@ impl State {
             .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
         let surface_format = surface_format.remove_srgb_suffix();
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
@@ -334,6 +353,7 @@ impl State {
             znear: 0.1,
             zfar: 100.0,
         };
+
         let camera_controller = CameraController::new(0.2);
 
         let mut camera_uniform = CameraUniform::new();
@@ -368,7 +388,8 @@ impl State {
             })
             .collect::<Vec<_>>();
 
-        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+        let instance_data = instances.iter().map(Instance::to_raw_with_transform).collect::<Vec<_>>();
+        
         let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Instance Buffer"),
             contents: bytemuck::cast_slice(&instance_data),
@@ -399,6 +420,46 @@ impl State {
             label: Some("camera_bind_group"),
         });
 
+           let light_uniform = LightUniform {
+            position: [2.0, 2.0, 2.0],
+            _padding: 0,
+            color: [1.0, 1.0, 1.0],
+            _padding2: 0,
+        };
+
+        // We'll want to update our lights position, so we use COPY_DST
+        let light_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Light VB"),
+                contents: bytemuck::cast_slice(&[light_uniform]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            }
+        );
+
+        let light_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+            label: None,
+        });
+
+        let light_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &light_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: light_buffer.as_entire_binding(),
+            }],
+            label: None,
+        });
+
         log::warn!("Load model");
         let obj_model =
             resources::load_model("cube.obj", &device, &queue, &texture_bind_group_layout)
@@ -416,7 +477,11 @@ impl State {
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&texture_bind_group_layout, &camera_bind_group_layout],
+                bind_group_layouts: &[
+                    &texture_bind_group_layout,
+                    &camera_bind_group_layout,
+                    &light_bind_group_layout,
+                ],
                 push_constant_ranges: &[],
             });
 
@@ -474,23 +539,6 @@ impl State {
             cache: None,
         });
 
-        let light_uniform = LightUniform {
-            position: [2.0, 2.0, 2.0],
-            _padding: 0,
-            color: [1.0, 1.0, 1.0],
-            _padding2: 0,
-        };
-
-        // We'll want to update our lights position, so we use COPY_DST
-        let light_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Light VB"),
-                contents: bytemuck::cast_slice(&[light_uniform]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            }
-        );
-
-
         Ok(Self {
             surface,
             device,
@@ -510,11 +558,16 @@ impl State {
             window,
             light_buffer,
             light_uniform,
+            light_bind_group,
         })
     }
+
+
     pub fn window(&self) -> &Window {
         &self.window
     }
+
+
     fn resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
             self.config.width = width;
@@ -538,12 +591,25 @@ impl State {
         log::info!("{:?}", self.camera);
         self.camera_uniform.update_view_proj(&self.camera);
         log::info!("{:?}", self.camera_uniform);
+
+     
         self.queue.write_buffer(
             &self.camera_buffer,
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
+
+        // Update the light
+        let old_position: cgmath::Vector3<_> = self.light_uniform.position.into();
+        self.light_uniform.position =
+            (cgmath::Quaternion::from_axis_angle((0.0, 1.0, 0.0).into(), cgmath::Deg(1.0))
+                * old_position)
+                .into();
+        self.queue.write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&[self.light_uniform]));
+
     }
+
+
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         self.window.request_redraw();
 
@@ -611,7 +677,7 @@ impl State {
 pub struct App {
     #[cfg(target_arch = "wasm32")]
     proxy: Option<winit::event_loop::EventLoopProxy<State>>,
-    state: Option<State>,3
+    state: Option<State>,
 }
 
 impl App {
